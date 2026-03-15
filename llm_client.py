@@ -38,10 +38,17 @@ def create_client(
     return OpenAI(api_key=key, base_url=base_url or DEFAULT_BASE_URL)
 
 
+# Допустимые форматы ответа: текст (по умолчанию), схема (JSON Schema), объект (JSON)
+ResponseFormatKind = str  # "text" | "schema" | "object"
+
+
 def complete(
     prompt: str,
     *,
     model: str = DEFAULT_MODEL,
+    max_tokens: int | None = None,
+    stop: list[str] | None = None,
+    response_format: ResponseFormatKind = "text",
     api_key: str | None = None,
     base_url: str | None = None,
 ) -> str:
@@ -50,16 +57,30 @@ def complete(
 
     :param prompt: текст запроса пользователя
     :param model: имя модели (по умолчанию deepseek-chat)
+    :param max_tokens: максимальное число токенов в ответе (None — без ограничения)
+    :param stop: список строк, при встрече любой из которых генерация останавливается
+    :param response_format: формат ответа — "text" (по умолчанию), "schema" (JSON Schema), "object" (JSON-объект)
     :param api_key: опционально — ключ API
     :param base_url: опционально — базовый URL API
     :return: текст ответа модели
-    :raises ValueError: если нет API-ключа
+    :raises ValueError: если нет API-ключа или неверный response_format
     :raises Exception: ошибки сети/API (пробрасываются без изменений)
     """
+    if response_format not in ("text", "schema", "object"):
+        raise ValueError(
+            f'response_format должен быть "text", "schema" или "object", получено: {response_format!r}'
+        )
     client = create_client(api_key=api_key, base_url=base_url)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    create_kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if max_tokens is not None:
+        create_kwargs["max_tokens"] = max_tokens
+    if stop:
+        create_kwargs["stop"] = stop
+    if response_format in ("schema", "object"):
+        create_kwargs["response_format"] = {"type": "json_object"}
+    response = client.chat.completions.create(**create_kwargs)
     content = response.choices[0].message.content
     return content or ""
