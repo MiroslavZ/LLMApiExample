@@ -45,6 +45,7 @@ ResponseFormatKind = str  # "text" | "schema" | "object"
 def complete(
     prompt: str,
     *,
+    system: str | None = None,
     model: str = DEFAULT_MODEL,
     max_tokens: int | None = None,
     stop: list[str] | None = None,
@@ -56,6 +57,7 @@ def complete(
     Отправляет промпт в модель и возвращает текст ответа.
 
     :param prompt: текст запроса пользователя
+    :param system: опционально — системный промпт (инструкции для модели)
     :param model: имя модели (по умолчанию deepseek-chat)
     :param max_tokens: максимальное число токенов в ответе (None — без ограничения)
     :param stop: список строк, при встрече любой из которых генерация останавливается
@@ -70,10 +72,14 @@ def complete(
         raise ValueError(
             f'response_format должен быть "text", "schema" или "object", получено: {response_format!r}'
         )
+    messages: list[dict] = []
+    if system and system.strip():
+        messages.append({"role": "system", "content": system.strip()})
+    messages.append({"role": "user", "content": prompt})
     client = create_client(api_key=api_key, base_url=base_url)
     create_kwargs: dict = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
     }
     if max_tokens is not None:
         create_kwargs["max_tokens"] = max_tokens
