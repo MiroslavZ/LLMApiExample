@@ -49,6 +49,7 @@ def complete(
     model: str = DEFAULT_MODEL,
     max_tokens: int | None = None,
     stop: list[str] | None = None,
+    temperature: float = 1.0,
     response_format: ResponseFormatKind = "text",
     api_key: str | None = None,
     base_url: str | None = None,
@@ -61,6 +62,7 @@ def complete(
     :param model: имя модели (по умолчанию deepseek-chat)
     :param max_tokens: максимальное число токенов в ответе (None — без ограничения)
     :param stop: список строк, при встрече любой из которых генерация останавливается
+    :param temperature: температура генерации (по умолчанию 1.0)
     :param response_format: формат ответа — "text" (по умолчанию), "schema" (JSON Schema), "object" (JSON-объект)
     :param api_key: опционально — ключ API
     :param base_url: опционально — базовый URL API
@@ -80,6 +82,7 @@ def complete(
     create_kwargs: dict = {
         "model": model,
         "messages": messages,
+        "temperature": temperature,
     }
     if max_tokens is not None:
         create_kwargs["max_tokens"] = max_tokens

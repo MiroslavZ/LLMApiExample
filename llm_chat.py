@@ -2,7 +2,7 @@
 """
 Консольная обёртка для запросов к языковой модели.
 Использование: python llm_chat.py --user "Ваш промпт здесь"
-Опции: --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --max-tokens N, --stop, --format text|schema|object.
+Опции: --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
 """
 
 import argparse
@@ -22,7 +22,7 @@ META_PROMPT_SYSTEM = (
 def parse_args(args: list[str]) -> argparse.Namespace:
     """
     Разбирает аргументы командной строки.
-    :return: объект с полями prompt_str, max_tokens (или None), stop_sequences (или None), response_format
+    :return: объект с полями prompt_str, max_tokens (или None), stop_sequences (или None), response_format, temperature
     """
     parser = argparse.ArgumentParser(
         description="Запрос к языковой модели Deepseek",
@@ -72,6 +72,13 @@ def parse_args(args: list[str]) -> argparse.Namespace:
         default=False,
         help="Сначала сгенерировать оптимальный промпт для задачи, затем выполнить запрос с ним",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        metavar="FLOAT",
+        help="Температура генерации (по умолчанию: 1.0)",
+    )
     parsed = parser.parse_args(args)
     return parsed
 
@@ -105,6 +112,7 @@ def main() -> None:
                     max_tokens=ns.max_tokens,
                     stop=ns.stop_sequences if ns.stop_sequences else None,
                     response_format="text",
+                    temperature=ns.temperature,
                 ).strip()
             if not effective_prompt:
                 console.print("[red]Модель не вернула оптимизированный промпт.[/red]")
@@ -128,6 +136,7 @@ def main() -> None:
                 max_tokens=ns.max_tokens,
                 stop=ns.stop_sequences if ns.stop_sequences else None,
                 response_format=ns.response_format,
+                temperature=ns.temperature,
             )
     except ValueError as e:
         console.print(f"[red]Ошибка:[/red] {e}", style="bold")
