@@ -4,6 +4,8 @@
 """
 
 import os
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -42,6 +44,17 @@ def create_client(
 ResponseFormatKind = str  # "text" | "schema" | "object"
 
 
+@dataclass(frozen=True, slots=True)
+class CompletionResult:
+    """Текст ответа модели, счётчики токенов из usage (если есть) и длительность запроса к API."""
+
+    content: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    elapsed_seconds: float = 0.0
+
+
 def complete(
     prompt: str,
     *,
@@ -53,9 +66,9 @@ def complete(
     response_format: ResponseFormatKind = "text",
     api_key: str | None = None,
     base_url: str | None = None,
-) -> str:
+) -> CompletionResult:
     """
-    Отправляет промпт в модель и возвращает текст ответа.
+    Отправляет промпт в модель и возвращает текст ответа и usage (токены).
 
     :param prompt: текст запроса пользователя
     :param system: опционально — системный промпт (инструкции для модели)
@@ -66,7 +79,7 @@ def complete(
     :param response_format: формат ответа — "text" (по умолчанию), "schema" (JSON Schema), "object" (JSON-объект)
     :param api_key: опционально — ключ API
     :param base_url: опционально — базовый URL API
-    :return: текст ответа модели
+    :return: текст ответа модели, поля usage (prompt/completion/total), если API их вернул, и elapsed_seconds — время вызова API в секундах
     :raises ValueError: если нет API-ключа или неверный response_format
     :raises Exception: ошибки сети/API (пробрасываются без изменений)
     """
@@ -90,6 +103,17 @@ def complete(
         create_kwargs["stop"] = stop
     if response_format in ("schema", "object"):
         create_kwargs["response_format"] = {"type": "json_object"}
+    t0 = time.perf_counter()
     response = client.chat.completions.create(**create_kwargs)
-    content = response.choices[0].message.content
-    return content or ""
+    elapsed = time.perf_counter() - t0
+    content = response.choices[0].message.content or ""
+    usage = response.usage
+    if usage is None:
+        return CompletionResult(content=content, elapsed_seconds=elapsed)
+    return CompletionResult(
+        content=content,
+        prompt_tokens=getattr(usage, "prompt_tokens", None),
+        completion_tokens=getattr(usage, "completion_tokens", None),
+        total_tokens=getattr(usage, "total_tokens", None),
+        elapsed_seconds=elapsed,
+    )

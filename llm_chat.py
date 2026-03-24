@@ -2,7 +2,7 @@
 """
 Консольная обёртка для запросов к языковой модели.
 Использование: python llm_chat.py --user "Ваш промпт здесь"
-Опции: --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
+Опции: --model NAME (по умолчанию deepseek-chat); --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
 """
 
 import argparse
@@ -12,21 +12,50 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from llm_client import complete
+from llm_client import DEFAULT_MODEL, CompletionResult, complete
 
 META_PROMPT_SYSTEM = (
     "Составь оптимальный промпт для решения следующей задачи. Готовые ответы не нужны, нужен ТОЛЬКО промпт, который поможет модели прийти к правильному решению. План для решения задачи."
 )
 
 
+def print_usage_stats(console: Console, result: CompletionResult) -> None:
+    """Выводит prompt / completion / total из usage и время запроса после ответа модели."""
+    parts: list[str] = []
+    if result.prompt_tokens is not None:
+        parts.append(f"prompt: {result.prompt_tokens}")
+    if result.completion_tokens is not None:
+        parts.append(f"completion: {result.completion_tokens}")
+    if result.total_tokens is not None:
+        parts.append(f"total: {result.total_tokens}")
+    if result.elapsed_seconds > 0:
+        parts.append(f"время: {result.elapsed_seconds:.2f} с")
+    if not parts:
+        return
+    has_usage = any(
+        x is not None
+        for x in (result.prompt_tokens, result.completion_tokens, result.total_tokens)
+    )
+    if has_usage:
+        console.print(f"[dim]Токены (usage): {' · '.join(parts)}[/dim]")
+    else:
+        console.print(f"[dim]Время запроса: {result.elapsed_seconds:.2f} с[/dim]")
+
+
 def parse_args(args: list[str]) -> argparse.Namespace:
     """
     Разбирает аргументы командной строки.
-    :return: объект с полями prompt_str, max_tokens (или None), stop_sequences (или None), response_format, temperature
+    :return: объект с полями model, prompt_str, max_tokens (или None), stop_sequences (или None), response_format, temperature
     """
     parser = argparse.ArgumentParser(
         description="Запрос к языковой модели Deepseek",
         epilog='Пример: python llm_chat.py --user "Кратко объясни квантовую запутанность" --max-tokens 500 --stop "---" "\\n\\n"',
+    )
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        metavar="NAME",
+        help=f"Идентификатор модели (по умолчанию: {DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--user",
@@ -109,11 +138,12 @@ def main() -> None:
                 effective_prompt = complete(
                     prompt,
                     system=META_PROMPT_SYSTEM,
+                    model=ns.model,
                     max_tokens=ns.max_tokens,
                     stop=ns.stop_sequences if ns.stop_sequences else None,
                     response_format="text",
                     temperature=ns.temperature,
-                ).strip()
+                ).content.strip()
             if not effective_prompt:
                 console.print("[red]Модель не вернула оптимизированный промпт.[/red]")
                 sys.exit(1)
@@ -130,14 +160,16 @@ def main() -> None:
 
     try:
         with console.status("[bold green]Запрос к модели..."):
-            content = complete(
+            completion = complete(
                 effective_prompt,
                 system=system_for_request,
+                model=ns.model,
                 max_tokens=ns.max_tokens,
                 stop=ns.stop_sequences if ns.stop_sequences else None,
                 response_format=ns.response_format,
                 temperature=ns.temperature,
             )
+            content = completion.content
     except ValueError as e:
         console.print(f"[red]Ошибка:[/red] {e}", style="bold")
         sys.exit(1)
@@ -147,6 +179,7 @@ def main() -> None:
 
     if not content:
         console.print("[yellow]Модель вернула пустой ответ.[/yellow]")
+        print_usage_stats(console, completion)
         return
 
     console.print(
@@ -156,6 +189,7 @@ def main() -> None:
             border_style="green",
         )
     )
+    print_usage_stats(console, completion)
 
 
 if __name__ == "__main__":
