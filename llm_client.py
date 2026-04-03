@@ -117,3 +117,66 @@ def complete(
         total_tokens=getattr(usage, "total_tokens", None),
         elapsed_seconds=elapsed,
     )
+
+
+META_PROMPT_SYSTEM = (
+    "Составь оптимальный промпт для решения следующей задачи. Готовые ответы не нужны, "
+    "нужен ТОЛЬКО промпт, который поможет модели прийти к правильному решению. План для решения задачи."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class MetaPromptCompletionResult:
+    """Результат двухшагового запроса: сначала уточнение промпта, затем ответ по нему."""
+
+    refined_prompt: str
+    final: CompletionResult
+
+
+def complete_with_meta_prompt(
+    user_task: str,
+    *,
+    system: str | None = None,
+    meta_system: str = META_PROMPT_SYSTEM,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int | None = None,
+    stop: list[str] | None = None,
+    temperature: float = 1.0,
+    response_format: ResponseFormatKind = "text",
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> MetaPromptCompletionResult:
+    """
+    Мета-промптинг: один запрос для генерации оптимального промпта по задаче, второй — ответ по этому промпту.
+
+    :param user_task: исходная формулировка задачи пользователя
+    :param system: системный промпт для финального ответа (как у ``complete``)
+    :param meta_system: системный промпт для шага уточнения промпта
+    :raises ValueError: если после первого шага модель вернула пустой промпт
+    """
+    meta_result = complete(
+        user_task,
+        system=meta_system,
+        model=model,
+        max_tokens=max_tokens,
+        stop=stop,
+        temperature=temperature,
+        response_format="text",
+        api_key=api_key,
+        base_url=base_url,
+    )
+    refined = meta_result.content.strip()
+    if not refined:
+        raise ValueError("Модель не вернула оптимизированный промпт (пустой ответ на шаге мета-промпта).")
+    final = complete(
+        refined,
+        system=system,
+        model=model,
+        max_tokens=max_tokens,
+        stop=stop,
+        temperature=temperature,
+        response_format=response_format,
+        api_key=api_key,
+        base_url=base_url,
+    )
+    return MetaPromptCompletionResult(refined_prompt=refined, final=final)

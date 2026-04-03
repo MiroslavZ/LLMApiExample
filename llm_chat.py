@@ -12,12 +12,12 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from llm_client import DEFAULT_MODEL, CompletionResult, complete
-
-META_PROMPT_SYSTEM = (
-    "Составь оптимальный промпт для решения следующей задачи. Готовые ответы не нужны, нужен ТОЛЬКО промпт, который поможет модели прийти к правильному решению. План для решения задачи."
+from llm_client import (
+    DEFAULT_MODEL,
+    CompletionResult,
+    complete,
+    complete_with_meta_prompt,
 )
-
 
 def print_usage_stats(console: Console, result: CompletionResult) -> None:
     """Выводит prompt / completion / total из usage и время запроса после ответа модели."""
@@ -130,46 +130,41 @@ def main() -> None:
     system_for_request = (
         ns.system_prompt.strip() if ns.system_prompt and ns.system_prompt.strip() else None
     )
-    effective_prompt = prompt
+    stop = ns.stop_sequences if ns.stop_sequences else None
 
-    if ns.meta_prompt:
-        try:
-            with console.status("[bold green]Генерация оптимального промпта..."):
-                effective_prompt = complete(
+    try:
+        if ns.meta_prompt:
+            with console.status("[bold green]Мета-промпт и запрос к модели..."):
+                meta_out = complete_with_meta_prompt(
                     prompt,
-                    system=META_PROMPT_SYSTEM,
+                    system=system_for_request,
                     model=ns.model,
                     max_tokens=ns.max_tokens,
-                    stop=ns.stop_sequences if ns.stop_sequences else None,
-                    response_format="text",
+                    stop=stop,
+                    response_format=ns.response_format,
                     temperature=ns.temperature,
-                ).content.strip()
-            if not effective_prompt:
-                console.print("[red]Модель не вернула оптимизированный промпт.[/red]")
-                sys.exit(1)
+                )
+            completion = meta_out.final
+            content = completion.content
             console.print(
                 Panel(
-                    f"[dim]{effective_prompt}[/dim]",
+                    f"[dim]{meta_out.refined_prompt}[/dim]",
                     title="[bold]Оптимизированный промпт[/bold]",
                     border_style="cyan",
                 )
             )
-        except Exception as e:
-            console.print(f"[red]Ошибка при генерации промпта:[/red] {e}", style="bold")
-            sys.exit(1)
-
-    try:
-        with console.status("[bold green]Запрос к модели..."):
-            completion = complete(
-                effective_prompt,
-                system=system_for_request,
-                model=ns.model,
-                max_tokens=ns.max_tokens,
-                stop=ns.stop_sequences if ns.stop_sequences else None,
-                response_format=ns.response_format,
-                temperature=ns.temperature,
-            )
-            content = completion.content
+        else:
+            with console.status("[bold green]Запрос к модели..."):
+                completion = complete(
+                    prompt,
+                    system=system_for_request,
+                    model=ns.model,
+                    max_tokens=ns.max_tokens,
+                    stop=stop,
+                    response_format=ns.response_format,
+                    temperature=ns.temperature,
+                )
+                content = completion.content
     except ValueError as e:
         console.print(f"[red]Ошибка:[/red] {e}", style="bold")
         sys.exit(1)
