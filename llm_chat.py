@@ -6,18 +6,15 @@
 """
 
 import argparse
+import os
 import sys
 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from llm_client import (
-    DEFAULT_MODEL,
-    CompletionResult,
-    complete,
-    complete_with_meta_prompt,
-)
+from llm_client import DEFAULT_MODEL, ENV_API_KEY, CompletionResult, LLMAgent
+
 
 def print_usage_stats(console: Console, result: CompletionResult) -> None:
     """Выводит prompt / completion / total из usage и время запроса после ответа модели."""
@@ -127,6 +124,13 @@ def main() -> None:
         Panel(f"[dim]{prompt}[/dim]", title="[bold]Промпт[/bold]", border_style="blue")
     )
 
+    api_key = os.getenv(ENV_API_KEY)
+    try:
+        agent = LLMAgent(api_key or "")
+    except ValueError as e:
+        console.print(f"[red]Ошибка:[/red] {e}", style="bold")
+        sys.exit(1)
+
     system_for_request = (
         ns.system_prompt.strip() if ns.system_prompt and ns.system_prompt.strip() else None
     )
@@ -135,7 +139,7 @@ def main() -> None:
     try:
         if ns.meta_prompt:
             with console.status("[bold green]Мета-промпт и запрос к модели..."):
-                meta_out = complete_with_meta_prompt(
+                meta_out = agent.complete_with_meta_prompt(
                     prompt,
                     system=system_for_request,
                     model=ns.model,
@@ -155,7 +159,7 @@ def main() -> None:
             )
         else:
             with console.status("[bold green]Запрос к модели..."):
-                completion = complete(
+                completion = agent.complete(
                     prompt,
                     system=system_for_request,
                     model=ns.model,
