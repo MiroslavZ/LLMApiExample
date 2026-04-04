@@ -50,15 +50,13 @@ class MetaPromptCompletionResult:
 class LLMAgent:
     """Агент запросов к API модели: ключ задаётся при создании, параметры вызова — в методах."""
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL) -> None:
         if not (api_key and api_key.strip()):
             raise ValueError(
                 f"Не задан API-ключ. Укажите {ENV_API_KEY} в .env или передайте непустой api_key."
             )
         self._api_key = api_key.strip()
-
-    def _openai_client(self, base_url: str | None) -> OpenAI:
-        return OpenAI(api_key=self._api_key, base_url=base_url or DEFAULT_BASE_URL)
+        self._base_url = base_url.strip() if base_url and base_url.strip() else DEFAULT_BASE_URL
 
     def complete(
         self,
@@ -85,7 +83,8 @@ class LLMAgent:
         if system and system.strip():
             messages.append({"role": "system", "content": system.strip()})
         messages.append({"role": "user", "content": prompt})
-        client = self._openai_client(base_url)
+        effective_base_url = base_url if base_url else self._base_url
+        client = OpenAI(api_key=self._api_key, base_url=effective_base_url)
         create_kwargs: dict = {
             "model": model,
             "messages": messages,
