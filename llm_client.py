@@ -52,17 +52,14 @@ class LLMAgent:
 
     def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL) -> None:
         if not (api_key and api_key.strip()):
-            raise ValueError(
-                f"Не задан API-ключ. Укажите {ENV_API_KEY} в .env или передайте непустой api_key."
-            )
+            raise ValueError(f"Не задан API-ключ. Укажите {ENV_API_KEY} в .env или передайте непустой api_key.")
         self._api_key = api_key.strip()
         self._base_url = base_url.strip() if base_url and base_url.strip() else DEFAULT_BASE_URL
 
-    def complete(
+    def _complete(
         self,
-        prompt: str,
+        messages: list[dict[str, str]],
         *,
-        system: str | None = None,
         model: str = DEFAULT_MODEL,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
@@ -71,7 +68,9 @@ class LLMAgent:
         base_url: str | None = None,
     ) -> CompletionResult:
         """
-        Отправляет промпт в модель и возвращает текст ответа и usage (токены).
+        Внутренний вызов API: один запрос к модели.
+
+        ``messages`` — список словарей ``{"role": ..., "content": ...}`` в формате Chat Completions API.
 
         :raises ValueError: при неверном response_format
         """
@@ -79,10 +78,6 @@ class LLMAgent:
             raise ValueError(
                 f'response_format должен быть "text", "schema" или "object", получено: {response_format!r}'
             )
-        messages: list[dict] = []
-        if system and system.strip():
-            messages.append({"role": "system", "content": system.strip()})
-        messages.append({"role": "user", "content": prompt})
         effective_base_url = base_url if base_url else self._base_url
         client = OpenAI(api_key=self._api_key, base_url=effective_base_url)
         create_kwargs: dict = {
@@ -111,6 +106,33 @@ class LLMAgent:
             elapsed_seconds=elapsed,
         )
 
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str = DEFAULT_MODEL,
+        max_tokens: int | None = None,
+        stop: list[str] | None = None,
+        temperature: float = 1.0,
+        response_format: ResponseFormatKind = "text",
+        base_url: str | None = None,
+    ) -> CompletionResult:
+        """Отправляет промпт в модель и возвращает текст ответа и usage (токены)."""
+        msgs: list[dict[str, str]] = []
+        if system and system.strip():
+            msgs.append({"role": "system", "content": system.strip()})
+        msgs.append({"role": "user", "content": prompt})
+        return self._complete(
+            msgs,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            temperature=temperature,
+            response_format=response_format,
+            base_url=base_url,
+        )
+
     def complete_with_meta_prompt(
         self,
         user_task: str,
@@ -129,9 +151,12 @@ class LLMAgent:
 
         :raises ValueError: если после первого шага модель вернула пустой промпт
         """
-        meta_result = self.complete(
-            user_task,
-            system=meta_system,
+        meta_messages: list[dict[str, str]] = []
+        if meta_system and meta_system.strip():
+            meta_messages.append({"role": "system", "content": meta_system.strip()})
+        meta_messages.append({"role": "user", "content": user_task})
+        meta_result = self._complete(
+            meta_messages,
             model=model,
             max_tokens=max_tokens,
             stop=stop,
@@ -144,9 +169,12 @@ class LLMAgent:
             raise ValueError(
                 "Модель не вернула оптимизированный промпт (пустой ответ на шаге мета-промпта)."
             )
-        final = self.complete(
-            refined,
-            system=system,
+        final_messages: list[dict[str, str]] = []
+        if system and system.strip():
+            final_messages.append({"role": "system", "content": system.strip()})
+        final_messages.append({"role": "user", "content": refined})
+        final = self._complete(
+            final_messages,
             model=model,
             max_tokens=max_tokens,
             stop=stop,
