@@ -3,9 +3,11 @@
 Не зависит от консоли и способа вывода — только запросы и возврат текста ответа.
 """
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -50,11 +52,62 @@ class MetaPromptCompletionResult:
 class LLMAgent:
     """Агент запросов к API модели: ключ задаётся при создании, параметры вызова — в методах."""
 
-    def __init__(self, api_key: str, base_url: str = DEFAULT_BASE_URL) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = DEFAULT_BASE_URL,
+        *,
+        clear: bool = False,
+    ) -> None:
         if not (api_key and api_key.strip()):
             raise ValueError(f"Не задан API-ключ. Укажите {ENV_API_KEY} в .env или передайте непустой api_key.")
         self._api_key = api_key.strip()
         self._base_url = base_url.strip() if base_url and base_url.strip() else DEFAULT_BASE_URL
+        self._history_path = Path.cwd() / "messages.json"
+        self._messages: list[dict[str, str]] = []
+        if not clear:
+            self._load_history()
+
+    def _load_history(self) -> None:
+        """Загружает историю диалога из ``messages.json`` в корне текущей рабочей директории."""
+        path = self._history_path
+        if not path.is_file():
+            self._messages = []
+            return
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            self._messages = []
+            return
+        if not raw:
+            self._messages = []
+            return
+        try:
+            self._messages = json.loads(raw)
+        except json.JSONDecodeError:
+            self._messages = []
+
+    def _save_history(self) -> None:
+        """Сохраняет ``self._messages`` в JSON-файл истории."""
+        self._history_path.write_text(
+            json.dumps(self._messages, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _has_started_system_prompt(self) -> bool:
+        """True, если в истории диалога уже есть сообщение с ролью ``system``."""
+        return any(msg.get("role") == "system" for msg in self._messages)
+
+    def get_dialog_history(self) -> list[dict[str, str]]:
+        """Возвращает историю диалога: список сообщений ``{"role", "content"}`` (тот же объект, что ``self._messages``)."""
+        return self._messages
+
+    def clear_dialog_history(self) -> None:
+        """Удаляет файл истории и сбрасывает список сообщений в памяти."""
+        # по идее, метод не нужен, при создании агента можно просто не загружать историю,
+        # после любого успешного запроса история все равно будет перезаписана
+        self._history_path.unlink(missing_ok=True)
+        self._messages = []
 
     def _complete(
         self,
@@ -119,12 +172,11 @@ class LLMAgent:
         base_url: str | None = None,
     ) -> CompletionResult:
         """Отправляет промпт в модель и возвращает текст ответа и usage (токены)."""
-        msgs: list[dict[str, str]] = []
-        if system and system.strip():
-            msgs.append({"role": "system", "content": system.strip()})
-        msgs.append({"role": "user", "content": prompt})
-        return self._complete(
-            msgs,
+        if system and system.strip() and not self._has_started_system_prompt():
+            self._messages.append({"role": "system", "content": system.strip()})
+        self._messages.append({"role": "user", "content": prompt})
+        result = self._complete(
+            self._messages,
             model=model,
             max_tokens=max_tokens,
             stop=stop,
@@ -132,6 +184,9 @@ class LLMAgent:
             response_format=response_format,
             base_url=base_url,
         )
+        self._messages.append({"role": "assistant", "content": result.content})
+        self._save_history()
+        return result
 
     def complete_with_meta_prompt(
         self,
@@ -151,6 +206,8 @@ class LLMAgent:
 
         :raises ValueError: если после первого шага модель вернула пустой промпт
         """
+        # Трудно представляю, как правильно сочетать мета-промптинг с сохранением истории диалога,
+        # остановился на том чтобы не включать в историю первую пару промптов (для генерации промпта моделью)
         meta_messages: list[dict[str, str]] = []
         if meta_system and meta_system.strip():
             meta_messages.append({"role": "system", "content": meta_system.strip()})
@@ -169,12 +226,11 @@ class LLMAgent:
             raise ValueError(
                 "Модель не вернула оптимизированный промпт (пустой ответ на шаге мета-промпта)."
             )
-        final_messages: list[dict[str, str]] = []
-        if system and system.strip():
-            final_messages.append({"role": "system", "content": system.strip()})
-        final_messages.append({"role": "user", "content": refined})
+        if system and system.strip() and not self._has_started_system_prompt():
+            self._messages.append({"role": "system", "content": system.strip()})
+        self._messages.append({"role": "user", "content": refined})
         final = self._complete(
-            final_messages,
+            self._messages,
             model=model,
             max_tokens=max_tokens,
             stop=stop,
@@ -182,4 +238,6 @@ class LLMAgent:
             response_format=response_format,
             base_url=base_url,
         )
+        self._messages.append({"role": "assistant", "content": final.content})
+        self._save_history()
         return MetaPromptCompletionResult(refined_prompt=refined, final=final)

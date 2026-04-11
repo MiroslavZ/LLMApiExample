@@ -2,7 +2,7 @@
 """
 Консольная обёртка для запросов к языковой модели.
 Использование: python llm_chat.py --user "Ваш промпт здесь"
-Опции: --model NAME (по умолчанию deepseek-chat); --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
+Опции: --model NAME (по умолчанию deepseek-chat); --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --clear — не подгружать историю из messages.json; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
 """
 
 import argparse
@@ -99,6 +99,13 @@ def parse_args(args: list[str]) -> argparse.Namespace:
         help="Сначала сгенерировать оптимальный промпт для задачи, затем выполнить запрос с ним",
     )
     parser.add_argument(
+        "--clear",
+        dest="clear_history",
+        action="store_true",
+        default=False,
+        help="Не загружать историю диалога из messages.json (начать с пустого контекста)",
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=1.0,
@@ -126,7 +133,7 @@ def main() -> None:
 
     api_key = os.getenv(ENV_API_KEY)
     try:
-        agent = LLMAgent(api_key or "")
+        agent = LLMAgent(api_key or "", clear=ns.clear_history)
     except ValueError as e:
         console.print(f"[red]Ошибка:[/red] {e}", style="bold")
         sys.exit(1)
