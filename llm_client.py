@@ -5,10 +5,11 @@
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
-from typing import cast
 
+import tiktoken
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -24,6 +25,34 @@ ENV_API_KEY = "DEEPSEEK_API_KEY"
 ResponseFormatKind = str  # "text" | "schema" | "object"
 
 
+@lru_cache(maxsize=1)
+def _tiktoken_encoding() -> tiktoken.Encoding:
+    return tiktoken.get_encoding("cl100k_base")
+
+
+def tiktoken_count_text(text: str) -> int:
+    return len(_tiktoken_encoding().encode(text or ""))
+
+
+def tiktoken_count_chat_messages(messages: list[dict[str, str]]) -> int:
+    """
+    Оценка числа токенов для списка сообщений чата (формат Chat Completions).
+    Используется схема подсчёта как у GPT-4 на cl100k — разумное приближение для DeepSeek.
+    """
+    encoding = _tiktoken_encoding()
+    tokens_per_message = 3
+    tokens_per_name = 1
+    num_tokens = 0
+    for message in messages:
+        num_tokens += tokens_per_message
+        for key, value in message.items():
+            num_tokens += len(encoding.encode(value))
+            if key == "name":
+                num_tokens += tokens_per_name
+    num_tokens += 3
+    return num_tokens
+
+
 @dataclass(frozen=True, slots=True)
 class CompletionResult:
     """Текст ответа модели, счётчики токенов из usage (если есть) и длительность запроса к API."""
@@ -33,6 +62,10 @@ class CompletionResult:
     completion_tokens: int | None = None
     total_tokens: int | None = None
     elapsed_seconds: float = 0.0
+    # Оценки tiktoken (cl100k): запрос = все сообщения в этом вызове API; ответ = текст ассистента; история = весь диалог после шага (если считали)
+    tiktoken_request: int | None = None
+    tiktoken_completion: int | None = None
+    tiktoken_dialog_total: int | None = None
 
 
 META_PROMPT_SYSTEM = (
@@ -148,15 +181,24 @@ class LLMAgent:
         response = client.chat.completions.create(**create_kwargs)
         elapsed = time.perf_counter() - t0
         content = response.choices[0].message.content or ""
+        req_tok = tiktoken_count_chat_messages(messages)
+        comp_tok = tiktoken_count_text(content)
         usage = response.usage
         if usage is None:
-            return CompletionResult(content=content, elapsed_seconds=elapsed)
+            return CompletionResult(
+                content=content,
+                elapsed_seconds=elapsed,
+                tiktoken_request=req_tok,
+                tiktoken_completion=comp_tok,
+            )
         return CompletionResult(
             content=content,
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
             total_tokens=getattr(usage, "total_tokens", None),
             elapsed_seconds=elapsed,
+            tiktoken_request=req_tok,
+            tiktoken_completion=comp_tok,
         )
 
     def complete(
@@ -186,7 +228,8 @@ class LLMAgent:
         )
         self._messages.append({"role": "assistant", "content": result.content})
         self._save_history()
-        return result
+        dialog_tok = tiktoken_count_chat_messages(self._messages)
+        return replace(result, tiktoken_dialog_total=dialog_tok)
 
     def complete_with_meta_prompt(
         self,
@@ -240,4 +283,6 @@ class LLMAgent:
         )
         self._messages.append({"role": "assistant", "content": final.content})
         self._save_history()
+        dialog_tok = tiktoken_count_chat_messages(self._messages)
+        final = replace(final, tiktoken_dialog_total=dialog_tok)
         return MetaPromptCompletionResult(refined_prompt=refined, final=final)

@@ -17,26 +17,34 @@ from llm_client import DEFAULT_MODEL, ENV_API_KEY, CompletionResult, LLMAgent
 
 
 def print_usage_stats(console: Console, result: CompletionResult) -> None:
-    """Выводит prompt / completion / total из usage и время запроса после ответа модели."""
-    parts: list[str] = []
+    """Выводит счётчики из API usage, оценки tiktoken (cl100k) и время запроса."""
+    api_parts: list[str] = []
     if result.prompt_tokens is not None:
-        parts.append(f"prompt: {result.prompt_tokens}")
+        api_parts.append(f"prompt {result.prompt_tokens}")
     if result.completion_tokens is not None:
-        parts.append(f"completion: {result.completion_tokens}")
+        api_parts.append(f"completion {result.completion_tokens}")
     if result.total_tokens is not None:
-        parts.append(f"total: {result.total_tokens}")
+        api_parts.append(f"total {result.total_tokens}")
+
+    tt_parts: list[str] = []
+    if result.tiktoken_request is not None:
+        tt_parts.append(f"запрос {result.tiktoken_request}")
+    if result.tiktoken_completion is not None:
+        tt_parts.append(f"ответ {result.tiktoken_completion}")
+    if result.tiktoken_dialog_total is not None:
+        tt_parts.append(f"история {result.tiktoken_dialog_total}")
+
+    lines: list[str] = []
+    if api_parts:
+        lines.append(f"API (usage): {' · '.join(api_parts)}")
+    if tt_parts:
+        lines.append(f"Оценка tiktoken (cl100k): {' · '.join(tt_parts)}")
     if result.elapsed_seconds > 0:
-        parts.append(f"время: {result.elapsed_seconds:.2f} с")
-    if not parts:
+        lines.append(f"время: {result.elapsed_seconds:.2f} с")
+
+    if not lines:
         return
-    has_usage = any(
-        x is not None
-        for x in (result.prompt_tokens, result.completion_tokens, result.total_tokens)
-    )
-    if has_usage:
-        console.print(f"[dim]Токены (usage): {' · '.join(parts)}[/dim]")
-    else:
-        console.print(f"[dim]Время запроса: {result.elapsed_seconds:.2f} с[/dim]")
+    console.print("[dim]" + "\n".join(lines) + "[/dim]")
 
 
 def parse_args(args: list[str]) -> argparse.Namespace:
