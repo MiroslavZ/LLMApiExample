@@ -83,13 +83,24 @@ class MetaPromptCompletionResult:
 
 
 class LLMAgent:
-    """Агент запросов к API модели: ключ задаётся при создании, параметры вызова — в методах."""
+    """
+    Агент запросов к API модели.
+
+    - API-ключ задаётся при создании (и никогда не пишется в runtime_config.json)
+    - Параметры вызовов (system/max_tokens/stop/temperature/response_format) могут браться из self
+      и кешируются в runtime_config.json в текущей директории.
+    """
 
     def __init__(
         self,
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
         *,
+        system: str | None = None,
+        max_tokens: int | None = None,
+        stop: list[str] | None = None,
+        temperature: float = 1.0,
+        response_format: ResponseFormatKind = "text",
         clear: bool = False,
     ) -> None:
         if not (api_key and api_key.strip()):
@@ -97,9 +108,116 @@ class LLMAgent:
         self._api_key = api_key.strip()
         self._base_url = base_url.strip() if base_url and base_url.strip() else DEFAULT_BASE_URL
         self._history_path = Path.cwd() / "messages.json"
+        self._runtime_config_path = Path.cwd() / "runtime_config.json"
+
+        # Дефолтные параметры вызовов (берутся из runtime_config.json, либо пишутся туда при первом запуске)
+        self._default_system: str | None = None
+        self._default_max_tokens: int | None = None
+        self._default_stop: list[str] | None = None
+        self._default_temperature: float = 1.0
+        self._default_response_format: ResponseFormatKind = "text"
+
+        self._load_or_init_runtime_config(
+            system=system,
+            max_tokens=max_tokens,
+            stop=stop,
+            temperature=temperature,
+            response_format=response_format,
+        )
+
         self._messages: list[dict[str, str]] = []
         if not clear:
             self._load_history()
+
+    def _load_or_init_runtime_config(
+        self,
+        *,
+        system: str | None,
+        max_tokens: int | None,
+        stop: list[str] | None,
+        temperature: float,
+        response_format: ResponseFormatKind,
+    ) -> None:
+        """
+        Загружает runtime_config.json из текущей директории.
+
+        - Если файла нет: создаёт его и сохраняет пришедшие в __init__ параметры (кроме api_key)
+        - Если файл есть: берёт значения из него (приоритетнее параметров конструктора)
+        """
+        # Нормализация входных значений конструктора
+        ctor_system = system.strip() if system and system.strip() else None
+        ctor_max_tokens = max_tokens
+        ctor_stop = stop if stop else None
+        ctor_temperature = float(temperature)
+        ctor_response_format = response_format
+
+        if ctor_response_format not in ("text", "schema", "object"):
+            raise ValueError(
+                f'response_format должен быть "text", "schema" или "object", получено: {ctor_response_format!r}'
+            )
+
+        path = self._runtime_config_path
+        if not path.is_file():
+            payload = {
+                "system": ctor_system,
+                "max_tokens": ctor_max_tokens,
+                "stop": ctor_stop,
+                "temperature": ctor_temperature,
+                "response_format": ctor_response_format,
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._default_system = ctor_system
+            self._default_max_tokens = ctor_max_tokens
+            self._default_stop = ctor_stop
+            self._default_temperature = ctor_temperature
+            self._default_response_format = ctor_response_format
+            return
+
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            raw = ""
+        data: dict = {}
+        if raw:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                data = {}
+
+        file_system = data.get("system", None)
+        if isinstance(file_system, str):
+            file_system = file_system.strip() or None
+        elif file_system is not None:
+            file_system = None
+
+        file_max_tokens = data.get("max_tokens", None)
+        if not (isinstance(file_max_tokens, int) or file_max_tokens is None):
+            file_max_tokens = None
+
+        file_stop = data.get("stop", None)
+        if isinstance(file_stop, list) and all(isinstance(x, str) for x in file_stop):
+            file_stop = file_stop or None
+        else:
+            file_stop = None
+
+        file_temperature = data.get("temperature", None)
+        if isinstance(file_temperature, (int, float)):
+            file_temperature = float(file_temperature)
+        else:
+            file_temperature = None
+
+        file_response_format = data.get("response_format", None)
+        if file_response_format not in ("text", "schema", "object"):
+            file_response_format = None
+
+        # Приоритет у файла, иначе — у параметров конструктора
+        self._default_system = file_system if file_system is not None else ctor_system
+        self._default_max_tokens = file_max_tokens if file_max_tokens is not None else ctor_max_tokens
+        self._default_stop = file_stop if file_stop is not None else ctor_stop
+        self._default_temperature = file_temperature if file_temperature is not None else ctor_temperature
+        self._default_response_format = (
+            file_response_format if file_response_format is not None else ctor_response_format
+        )
 
     def _load_history(self) -> None:
         """Загружает историю диалога из ``messages.json`` в корне текущей рабочей директории."""
@@ -209,21 +327,28 @@ class LLMAgent:
         model: str = DEFAULT_MODEL,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-        temperature: float = 1.0,
-        response_format: ResponseFormatKind = "text",
+        temperature: float | None = None,
+        response_format: ResponseFormatKind | None = None,
         base_url: str | None = None,
     ) -> CompletionResult:
         """Отправляет промпт в модель и возвращает текст ответа и usage (токены)."""
-        if system and system.strip() and not self._has_started_system_prompt():
-            self._messages.append({"role": "system", "content": system.strip()})
+        effective_system = system if system is not None else self._default_system
+        if effective_system and effective_system.strip() and not self._has_started_system_prompt():
+            self._messages.append({"role": "system", "content": effective_system.strip()})
         self._messages.append({"role": "user", "content": prompt})
+
+        effective_max_tokens = max_tokens if max_tokens is not None else self._default_max_tokens
+        effective_stop = stop if stop is not None else self._default_stop
+        effective_temperature = temperature if temperature is not None else self._default_temperature
+        effective_response_format = response_format if response_format is not None else self._default_response_format
+
         result = self._complete(
             self._messages,
             model=model,
-            max_tokens=max_tokens,
-            stop=stop,
-            temperature=temperature,
-            response_format=response_format,
+            max_tokens=effective_max_tokens,
+            stop=effective_stop,
+            temperature=effective_temperature,
+            response_format=effective_response_format,
             base_url=base_url,
         )
         self._messages.append({"role": "assistant", "content": result.content})
@@ -240,8 +365,8 @@ class LLMAgent:
         model: str = DEFAULT_MODEL,
         max_tokens: int | None = None,
         stop: list[str] | None = None,
-        temperature: float = 1.0,
-        response_format: ResponseFormatKind = "text",
+        temperature: float | None = None,
+        response_format: ResponseFormatKind | None = None,
         base_url: str | None = None,
     ) -> MetaPromptCompletionResult:
         """
@@ -255,12 +380,17 @@ class LLMAgent:
         if meta_system and meta_system.strip():
             meta_messages.append({"role": "system", "content": meta_system.strip()})
         meta_messages.append({"role": "user", "content": user_task})
+        effective_max_tokens = max_tokens if max_tokens is not None else self._default_max_tokens
+        effective_stop = stop if stop is not None else self._default_stop
+        effective_temperature = temperature if temperature is not None else self._default_temperature
+        effective_response_format = response_format if response_format is not None else self._default_response_format
+
         meta_result = self._complete(
             meta_messages,
             model=model,
-            max_tokens=max_tokens,
-            stop=stop,
-            temperature=temperature,
+            max_tokens=effective_max_tokens,
+            stop=effective_stop,
+            temperature=effective_temperature,
             response_format="text",
             base_url=base_url,
         )
@@ -269,16 +399,19 @@ class LLMAgent:
             raise ValueError(
                 "Модель не вернула оптимизированный промпт (пустой ответ на шаге мета-промпта)."
             )
-        if system and system.strip() and not self._has_started_system_prompt():
-            self._messages.append({"role": "system", "content": system.strip()})
+
+        effective_system = system if system is not None else self._default_system
+        if effective_system and effective_system.strip() and not self._has_started_system_prompt():
+            self._messages.append({"role": "system", "content": effective_system.strip()})
         self._messages.append({"role": "user", "content": refined})
+
         final = self._complete(
             self._messages,
             model=model,
-            max_tokens=max_tokens,
-            stop=stop,
-            temperature=temperature,
-            response_format=response_format,
+            max_tokens=effective_max_tokens,
+            stop=effective_stop,
+            temperature=effective_temperature,
+            response_format=effective_response_format,
             base_url=base_url,
         )
         self._messages.append({"role": "assistant", "content": final.content})

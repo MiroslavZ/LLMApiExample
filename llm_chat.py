@@ -141,7 +141,15 @@ def main() -> None:
 
     api_key = os.getenv(ENV_API_KEY)
     try:
-        agent = LLMAgent(api_key or "", clear=ns.clear_history)
+        agent = LLMAgent(
+            api_key or "",
+            clear=ns.clear_history,
+            system=ns.system_prompt,
+            max_tokens=ns.max_tokens,
+            stop=ns.stop_sequences,
+            temperature=ns.temperature,
+            response_format=ns.response_format,
+        )
     except ValueError as e:
         console.print(f"[red]Ошибка:[/red] {e}", style="bold")
         sys.exit(1)
