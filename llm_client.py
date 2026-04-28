@@ -82,6 +82,67 @@ class MetaPromptCompletionResult:
     final: CompletionResult
 
 
+class HistoryManager:
+    """
+    Менеджер истории диалога в формате Chat Completions: список сообщений ``{"role", "content"}``.
+
+    По умолчанию хранит историю в ``messages.json`` в текущей рабочей директории.
+    """
+
+    def __init__(self, history_path: Path) -> None:
+        self._history_path = history_path
+        self._messages: list[dict[str, str]] = []
+
+    def load(self) -> None:
+        """Загружает историю диалога из файла в память."""
+        path = self._history_path
+        if not path.is_file():
+            self._messages = []
+            return
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            self._messages = []
+            return
+        if not raw:
+            self._messages = []
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            self._messages = []
+            return
+        self._messages = data if isinstance(data, list) else []
+
+    def save(self) -> None:
+        """Сохраняет историю из памяти в файл."""
+        self._history_path.write_text(
+            json.dumps(self._messages, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def clear(self) -> None:
+        """Удаляет файл истории и сбрасывает список сообщений в памяти."""
+        self._history_path.unlink(missing_ok=True)
+        self._messages = []
+
+    def get_messages(self) -> list[dict[str, str]]:
+        """Возвращает текущую историю (тот же объект списка)."""
+        return self._messages
+
+    def add_message(self, role: str, content: str) -> None:
+        self._messages.append({"role": role, "content": content})
+
+    def has_system_prompt(self) -> bool:
+        """True, если в истории уже есть сообщение с ролью ``system``."""
+        return any(msg.get("role") == "system" for msg in self._messages)
+
+    def ensure_system_prompt(self, system: str | None) -> None:
+        """Добавляет system-сообщение в историю, если его ещё нет и текст непустой."""
+        if system and system.strip() and not self.has_system_prompt():
+            self.add_message("system", system.strip())
+
+
 class LLMAgent:
     """
     Агент запросов к API модели.
@@ -109,6 +170,7 @@ class LLMAgent:
         self._base_url = base_url.strip() if base_url and base_url.strip() else DEFAULT_BASE_URL
         self._history_path = Path.cwd() / "messages.json"
         self._runtime_config_path = Path.cwd() / "runtime_config.json"
+        self._history = HistoryManager(self._history_path)
 
         # Дефолтные параметры вызовов (берутся из runtime_config.json, либо пишутся туда при первом запуске)
         self._default_system: str | None = None
@@ -125,9 +187,8 @@ class LLMAgent:
             response_format=response_format,
         )
 
-        self._messages: list[dict[str, str]] = []
         if not clear:
-            self._load_history()
+            self._history.load()
 
     def _load_or_init_runtime_config(
         self,
@@ -219,46 +280,15 @@ class LLMAgent:
             file_response_format if file_response_format is not None else ctor_response_format
         )
 
-    def _load_history(self) -> None:
-        """Загружает историю диалога из ``messages.json`` в корне текущей рабочей директории."""
-        path = self._history_path
-        if not path.is_file():
-            self._messages = []
-            return
-        try:
-            raw = path.read_text(encoding="utf-8").strip()
-        except OSError:
-            self._messages = []
-            return
-        if not raw:
-            self._messages = []
-            return
-        try:
-            self._messages = json.loads(raw)
-        except json.JSONDecodeError:
-            self._messages = []
-
-    def _save_history(self) -> None:
-        """Сохраняет ``self._messages`` в JSON-файл истории."""
-        self._history_path.write_text(
-            json.dumps(self._messages, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-    def _has_started_system_prompt(self) -> bool:
-        """True, если в истории диалога уже есть сообщение с ролью ``system``."""
-        return any(msg.get("role") == "system" for msg in self._messages)
-
     def get_dialog_history(self) -> list[dict[str, str]]:
-        """Возвращает историю диалога: список сообщений ``{"role", "content"}`` (тот же объект, что ``self._messages``)."""
-        return self._messages
+        """Возвращает историю диалога: список сообщений ``{"role", "content"}``."""
+        return self._history.get_messages()
 
     def clear_dialog_history(self) -> None:
         """Удаляет файл истории и сбрасывает список сообщений в памяти."""
         # по идее, метод не нужен, при создании агента можно просто не загружать историю,
         # после любого успешного запроса история все равно будет перезаписана
-        self._history_path.unlink(missing_ok=True)
-        self._messages = []
+        self._history.clear()
 
     def _complete(
         self,
@@ -333,9 +363,8 @@ class LLMAgent:
     ) -> CompletionResult:
         """Отправляет промпт в модель и возвращает текст ответа и usage (токены)."""
         effective_system = system if system is not None else self._default_system
-        if effective_system and effective_system.strip() and not self._has_started_system_prompt():
-            self._messages.append({"role": "system", "content": effective_system.strip()})
-        self._messages.append({"role": "user", "content": prompt})
+        self._history.ensure_system_prompt(effective_system)
+        self._history.add_message("user", prompt)
 
         effective_max_tokens = max_tokens if max_tokens is not None else self._default_max_tokens
         effective_stop = stop if stop is not None else self._default_stop
@@ -343,7 +372,7 @@ class LLMAgent:
         effective_response_format = response_format if response_format is not None else self._default_response_format
 
         result = self._complete(
-            self._messages,
+            self._history.get_messages(),
             model=model,
             max_tokens=effective_max_tokens,
             stop=effective_stop,
@@ -351,9 +380,9 @@ class LLMAgent:
             response_format=effective_response_format,
             base_url=base_url,
         )
-        self._messages.append({"role": "assistant", "content": result.content})
-        self._save_history()
-        dialog_tok = tiktoken_count_chat_messages(self._messages)
+        self._history.add_message("assistant", result.content)
+        self._history.save()
+        dialog_tok = tiktoken_count_chat_messages(self._history.get_messages())
         return replace(result, tiktoken_dialog_total=dialog_tok)
 
     def complete_with_meta_prompt(
@@ -401,12 +430,11 @@ class LLMAgent:
             )
 
         effective_system = system if system is not None else self._default_system
-        if effective_system and effective_system.strip() and not self._has_started_system_prompt():
-            self._messages.append({"role": "system", "content": effective_system.strip()})
-        self._messages.append({"role": "user", "content": refined})
+        self._history.ensure_system_prompt(effective_system)
+        self._history.add_message("user", refined)
 
         final = self._complete(
-            self._messages,
+            self._history.get_messages(),
             model=model,
             max_tokens=effective_max_tokens,
             stop=effective_stop,
@@ -414,8 +442,8 @@ class LLMAgent:
             response_format=effective_response_format,
             base_url=base_url,
         )
-        self._messages.append({"role": "assistant", "content": final.content})
-        self._save_history()
-        dialog_tok = tiktoken_count_chat_messages(self._messages)
+        self._history.add_message("assistant", final.content)
+        self._history.save()
+        dialog_tok = tiktoken_count_chat_messages(self._history.get_messages())
         final = replace(final, tiktoken_dialog_total=dialog_tok)
         return MetaPromptCompletionResult(refined_prompt=refined, final=final)
