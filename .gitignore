@@ -288,3 +288,6 @@ pyrightconfig.json
 
 # current dialog history
 messages.json
+
+# runtime config
+runtime_config.json

@@ -2,7 +2,7 @@
 """
 Консольная обёртка для запросов к языковой модели.
 Использование: python llm_chat.py --user "Ваш промпт здесь"
-Опции: --model NAME (по умолчанию deepseek-chat); --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --clear — не подгружать историю из messages.json; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
+Опции: --model NAME (по умолчанию deepseek-chat); --system TEXT — системный промпт; --meta-prompt — сначала сгенерировать оптимальный промпт, затем выполнить запрос с ним; --clear — не подгружать историю из messages.json; --compress-every N, --keep N — сжатие истории диалога; --max-tokens N, --stop, --format text|schema|object, --temperature FLOAT.
 """
 
 import argparse
@@ -50,7 +50,7 @@ def print_usage_stats(console: Console, result: CompletionResult) -> None:
 def parse_args(args: list[str]) -> argparse.Namespace:
     """
     Разбирает аргументы командной строки.
-    :return: объект с полями model, prompt_str, max_tokens (или None), stop_sequences (или None), response_format, temperature
+    :return: объект с полями model, prompt_str, max_tokens (или None), stop_sequences (или None), response_format, temperature, compress_every, keep
     """
     parser = argparse.ArgumentParser(
         description="Запрос к языковой модели Deepseek",
@@ -114,6 +114,20 @@ def parse_args(args: list[str]) -> argparse.Namespace:
         help="Не загружать историю диалога из messages.json (начать с пустого контекста)",
     )
     parser.add_argument(
+        "--compress-every",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Сжатие истории: при длине >= N + keep старые сообщения суммаризируются (по умолчанию отключено)",
+    )
+    parser.add_argument(
+        "--keep",
+        type=int,
+        default=0,
+        metavar="N",
+        help="При сжатии истории оставить последние N сообщений без изменений (по умолчанию: 0)",
+    )
+    parser.add_argument(
         "--temperature",
         type=float,
         default=1.0,
@@ -149,6 +163,8 @@ def main() -> None:
             stop=ns.stop_sequences,
             temperature=ns.temperature,
             response_format=ns.response_format,
+            compress_every=ns.compress_every,
+            keep=ns.keep,
         )
     except ValueError as e:
         console.print(f"[red]Ошибка:[/red] {e}", style="bold")

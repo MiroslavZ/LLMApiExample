@@ -73,6 +73,11 @@ META_PROMPT_SYSTEM = (
     "нужен ТОЛЬКО промпт, который поможет модели прийти к правильному решению. План для решения задачи."
 )
 
+COMPRESS_HISTORY_SYSTEM = (
+    "Ты ассистент, который суммаризирует диалоги. Сохрани ключевые факты, решения, договорённости и контекст, "
+    "нужные для продолжения беседы. Пиши связно и кратко, без воды."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class MetaPromptCompletionResult:
@@ -87,11 +92,76 @@ class HistoryManager:
     Менеджер истории диалога в формате Chat Completions: список сообщений ``{"role", "content"}``.
 
     По умолчанию хранит историю в ``messages.json`` в текущей рабочей директории.
+
+    Сжатие (опционально): при ``compress_every`` не ``None`` и > 0, когда длина диалога достигает
+    ``compress_every + keep``, вызывается ``compress_history``: старые сообщения (все кроме последних
+    ``keep``) суммаризируются и заменяются одним сообщением с ролью ``system``.
     """
 
-    def __init__(self, history_path: Path) -> None:
+    def __init__(
+        self,
+        history_path: Path,
+        *,
+        compress_every: int | None = None,
+        keep: int = 0,
+    ) -> None:
         self._history_path = history_path
         self._messages: list[dict[str, str]] = []
+        self._compress_every = compress_every
+        self._keep = max(0, int(keep))
+
+    def _compression_enabled(self) -> bool:
+        return self._compress_every is not None and self._compress_every > 0
+
+    def should_compress(self) -> bool:
+        """True, если по правилу ``len >= compress_every + keep`` нужно сжать историю."""
+        if not self._compression_enabled():
+            return False
+        assert self._compress_every is not None
+        return len(self._messages) >= self._compress_every + self._keep
+
+    def compress_history(
+        self,
+        client: OpenAI,
+        *,
+        model: str = DEFAULT_MODEL,
+        max_tokens: int | None = None,
+        temperature: float = 0.3,
+    ) -> str:
+        """
+        Суммаризирует префикс истории (все сообщения кроме последних ``keep``) через API,
+        заменяет их одним ``system``-сообщением с текстом суммаризации. Хвост из ``keep`` сообщений
+        сохраняется без изменений.
+        """
+        if not self.should_compress():
+            return ""
+        keep = self._keep
+        old = self._messages[:-keep] if keep else self._messages[:]
+        tail = self._messages[-keep:] if keep else []
+        lines: list[str] = []
+        for msg in old:
+            role = msg.get("role", "")
+            content = (msg.get("content") or "").strip()
+            lines.append(f"[{role}]: {content}")
+        dialog_block = "\n".join(lines)
+        user_content = (
+            "Суммаризируй следующий диалог. У каждой реплики указана роль в квадратных скобках.\n\n"
+            f"{dialog_block}"
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": COMPRESS_HISTORY_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=temperature,
+            **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+        )
+        summary = (response.choices[0].message.content or "").strip()
+        if not summary:
+            return ""
+        self._messages = [{"role": "system", "content": summary}] + tail
+        return summary
 
     def load(self) -> None:
         """Загружает историю диалога из файла в память."""
@@ -148,8 +218,8 @@ class LLMAgent:
     Агент запросов к API модели.
 
     - API-ключ задаётся при создании (и никогда не пишется в runtime_config.json)
-    - Параметры вызовов (system/max_tokens/stop/temperature/response_format) могут браться из self
-      и кешируются в runtime_config.json в текущей директории.
+    - Параметры вызовов (system/max_tokens/stop/temperature/response_format/compress_every/keep)
+      могут браться из self и кешируются в runtime_config.json в текущей директории.
     """
 
     def __init__(
@@ -163,6 +233,8 @@ class LLMAgent:
         temperature: float = 1.0,
         response_format: ResponseFormatKind = "text",
         clear: bool = False,
+        compress_every: int | None = None,
+        keep: int = 0,
     ) -> None:
         if not (api_key and api_key.strip()):
             raise ValueError(f"Не задан API-ключ. Укажите {ENV_API_KEY} в .env или передайте непустой api_key.")
@@ -170,7 +242,6 @@ class LLMAgent:
         self._base_url = base_url.strip() if base_url and base_url.strip() else DEFAULT_BASE_URL
         self._history_path = Path.cwd() / "messages.json"
         self._runtime_config_path = Path.cwd() / "runtime_config.json"
-        self._history = HistoryManager(self._history_path)
 
         # Дефолтные параметры вызовов (берутся из runtime_config.json, либо пишутся туда при первом запуске)
         self._default_system: str | None = None
@@ -178,6 +249,8 @@ class LLMAgent:
         self._default_stop: list[str] | None = None
         self._default_temperature: float = 1.0
         self._default_response_format: ResponseFormatKind = "text"
+        self._default_compress_every: int | None = None
+        self._default_keep: int = 0
 
         self._load_or_init_runtime_config(
             system=system,
@@ -185,6 +258,14 @@ class LLMAgent:
             stop=stop,
             temperature=temperature,
             response_format=response_format,
+            compress_every=compress_every,
+            keep=keep,
+        )
+
+        self._history = HistoryManager(
+            self._history_path,
+            compress_every=self._default_compress_every,
+            keep=self._default_keep,
         )
 
         if not clear:
@@ -198,6 +279,8 @@ class LLMAgent:
         stop: list[str] | None,
         temperature: float,
         response_format: ResponseFormatKind,
+        compress_every: int | None,
+        keep: int,
     ) -> None:
         """
         Загружает runtime_config.json из текущей директории.
@@ -211,6 +294,11 @@ class LLMAgent:
         ctor_stop = stop if stop else None
         ctor_temperature = float(temperature)
         ctor_response_format = response_format
+        ctor_compress_every: int | None = compress_every
+        if ctor_compress_every is not None:
+            ce = int(ctor_compress_every)
+            ctor_compress_every = ce if ce > 0 else None
+        ctor_keep = max(0, int(keep))
 
         if ctor_response_format not in ("text", "schema", "object"):
             raise ValueError(
@@ -225,6 +313,8 @@ class LLMAgent:
                 "stop": ctor_stop,
                 "temperature": ctor_temperature,
                 "response_format": ctor_response_format,
+                "compress_every": ctor_compress_every,
+                "keep": ctor_keep,
             }
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             self._default_system = ctor_system
@@ -232,6 +322,8 @@ class LLMAgent:
             self._default_stop = ctor_stop
             self._default_temperature = ctor_temperature
             self._default_response_format = ctor_response_format
+            self._default_compress_every = ctor_compress_every
+            self._default_keep = ctor_keep
             return
 
         try:
@@ -271,6 +363,26 @@ class LLMAgent:
         if file_response_format not in ("text", "schema", "object"):
             file_response_format = None
 
+        if "compress_every" in data:
+            raw_ce = data["compress_every"]
+            if raw_ce is None:
+                file_compress_every: int | None = None
+            elif isinstance(raw_ce, int) and raw_ce > 0:
+                file_compress_every = raw_ce
+            else:
+                file_compress_every = ctor_compress_every
+        else:
+            file_compress_every = ctor_compress_every
+
+        if "keep" in data:
+            raw_k = data["keep"]
+            if isinstance(raw_k, int) and raw_k >= 0:
+                file_keep = max(0, raw_k)
+            else:
+                file_keep = ctor_keep
+        else:
+            file_keep = ctor_keep
+
         # Приоритет у файла, иначе — у параметров конструктора
         self._default_system = file_system if file_system is not None else ctor_system
         self._default_max_tokens = file_max_tokens if file_max_tokens is not None else ctor_max_tokens
@@ -279,6 +391,8 @@ class LLMAgent:
         self._default_response_format = (
             file_response_format if file_response_format is not None else ctor_response_format
         )
+        self._default_compress_every = file_compress_every
+        self._default_keep = file_keep
 
     def get_dialog_history(self) -> list[dict[str, str]]:
         """Возвращает историю диалога: список сообщений ``{"role", "content"}``."""
@@ -289,6 +403,23 @@ class LLMAgent:
         # по идее, метод не нужен, при создании агента можно просто не загружать историю,
         # после любого успешного запроса история все равно будет перезаписана
         self._history.clear()
+
+    def _compress_dialog_if_needed(
+        self,
+        *,
+        model: str,
+        max_tokens: int | None,
+        base_url: str | None = None,
+    ) -> None:
+        if not self._history.should_compress():
+            return
+        effective_base_url = base_url if base_url else self._base_url
+        client = OpenAI(api_key=self._api_key, base_url=effective_base_url)
+        self._history.compress_history(
+            client,
+            model=model,
+            max_tokens=max_tokens,
+        )
 
     def _complete(
         self,
@@ -371,6 +502,12 @@ class LLMAgent:
         effective_temperature = temperature if temperature is not None else self._default_temperature
         effective_response_format = response_format if response_format is not None else self._default_response_format
 
+        self._compress_dialog_if_needed(
+            model=model,
+            max_tokens=effective_max_tokens,
+            base_url=base_url,
+        )
+
         result = self._complete(
             self._history.get_messages(),
             model=model,
@@ -432,6 +569,12 @@ class LLMAgent:
         effective_system = system if system is not None else self._default_system
         self._history.ensure_system_prompt(effective_system)
         self._history.add_message("user", refined)
+
+        self._compress_dialog_if_needed(
+            model=model,
+            max_tokens=effective_max_tokens,
+            base_url=base_url,
+        )
 
         final = self._complete(
             self._history.get_messages(),
